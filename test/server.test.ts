@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { loadConfig } from "../src/config.ts";
 import { GoogleIdTokenVerifier } from "../src/jwt.ts";
-import { createHandler } from "../src/server.ts";
+import { Logger } from "../src/logger.ts";
+import { createHandler, pushPathsFor } from "../src/server.ts";
 import type { Context } from "../src/server.ts";
 import type { FetchLike } from "../src/fetch-like.ts";
 import { SUBSCRIPTION, generateKeys, jwksFetch, jwtClaims, pubsubPushBody, signJwt, testLog } from "./helpers.ts";
@@ -38,7 +39,10 @@ const recorder =
 const env = {
   HERMES_WEBHOOK_URL: "https://hermes.internal.railway.app/webhooks/gmail",
   HERMES_WEBHOOK_SECRET: "route-secret",
-  HOSTNAME: "127.0.0.1",
+  BIND_HOST: "127.0.0.1",
+  PUBSUB_PROJECT: "hermes-agent-511204",
+  PUBSUB_SUBSCRIPTION: "hermes",
+  PUBSUB_SERVICE_ACCOUNT_EMAIL: "hermes-agent@hermes-agent-511204.iam.gserviceaccount.com",
 };
 
 const buildContext = (
@@ -97,11 +101,13 @@ describe("push endpoint", () => {
 
   test("accepts the route name as an alternate push path", async () => {
     const keys = await generateKeys();
-    const sink: { calls: Captured[] } = { calls: [] };
-    const handler = createHandler(buildContext(keys, recorder(() => new Response(null, { status: 202 }), sink)));
-    const response = await handler(pushRequest(await signJwt(keys, jwtClaims()), pubsubPushBody({ ok: true }), "/gmail"));
-    expect(response.status).toBe(204);
-    expect(sink.calls).toHaveLength(1);
+    for (const path of ["/gmail", "/webhook/gmail", "/webhooks/gmail"]) {
+      const sink: { calls: Captured[] } = { calls: [] };
+      const handler = createHandler(buildContext(keys, recorder(() => new Response(null, { status: 202 }), sink)));
+      const response = await handler(pushRequest(await signJwt(keys, jwtClaims()), pubsubPushBody({ ok: true }), path));
+      expect(response.status).toBe(204);
+      expect(sink.calls).toHaveLength(1);
+    }
   });
 
   test("rejects a request with no bearer token", async () => {
@@ -276,12 +282,50 @@ describe("operational routes", () => {
     const keys = await generateKeys();
     const handler = createHandler(buildContext(keys, async () => new Response(null, { status: 200 })));
 
-    expect((await handler(new Request("https://webhook-proxy.up.railway.app/nope"))).status).toBe(404);
+    const missing = await handler(new Request("https://webhook-proxy.up.railway.app/nope"));
+    expect(missing.status).toBe(404);
+    expect(((await missing.json()) as Record<string, unknown>).pushPaths).toEqual(
+      pushPathsFor(loadConfig(env)),
+    );
     expect(
-      (await handler(new Request("https://webhook-proxy.up.railway.app/webhook", { method: "DELETE" }))).status,
+      (await handler(new Request("https://webhook-proxy.up.railway.app/webhooks/gmail", { method: "DELETE" }))).status,
     ).toBe(405);
     expect(
       (await handler(new Request("https://webhook-proxy.up.railway.app/webhook", { method: "GET" }))).status,
     ).toBe(405);
+  });
+
+  test("logs unmatched paths and rejected methods", async () => {
+    const keys = await generateKeys();
+    const config = loadConfig(env);
+    const lines: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation((line: string) => lines.push(line));
+    const warnSpy = spyOn(console, "warn").mockImplementation((line: string) => lines.push(line));
+    try {
+      const handler = createHandler({
+        config,
+        log: new Logger("debug"),
+        verifier: new GoogleIdTokenVerifier(new Logger("off"), 3600, jwksFetch(keys)),
+        fetchImpl: async () => new Response(null, { status: 200 }),
+      });
+      await handler(new Request("https://webhook-proxy.up.railway.app/webhooks/typo", { method: "POST" }));
+      await handler(new Request("https://webhook-proxy.up.railway.app/webhooks/gmail", { method: "GET" }));
+    } finally {
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+
+    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "unmatched_path",
+        method: "POST",
+        path: "/webhooks/typo",
+        pushPaths: pushPathsFor(config),
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "method_not_allowed", method: "GET", path: "/webhooks/gmail" }),
+    );
   });
 });

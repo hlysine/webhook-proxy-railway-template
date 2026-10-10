@@ -26,7 +26,7 @@ export interface HermesConfig {
 
 export interface Config {
   port: number;
-  hostname: string;
+  bindHost: string;
   publicUrl: string | null;
   logLevel: LogLevel;
   maxBodyBytes: number;
@@ -99,11 +99,14 @@ const routeFromUrl = (url: string): string => {
 };
 
 export const loadConfig = (env: Record<string, string | undefined> = process.env): Config => {
-  const hostname = str(env, "HOSTNAME", "0.0.0.0");
+  // Deliberately not HOSTNAME: Docker/Kubernetes/Railway always inject it as the
+  // container or pod name, which is resolvable but never a valid listen address.
+  const bindHost = str(env, "BIND_HOST", "0.0.0.0");
+
   const insecureSkipJwt = bool(env, "INSECURE_SKIP_JWT", false);
-  if (insecureSkipJwt && !LOOPBACK.has(hostname.toLowerCase())) {
+  if (insecureSkipJwt && !LOOPBACK.has(bindHost.toLowerCase())) {
     throw new ConfigError(
-      `INSECURE_SKIP_JWT is only allowed when HOSTNAME is a loopback address (got "${hostname}")`,
+      `INSECURE_SKIP_JWT is only allowed when BIND_HOST is a loopback address (got "${bindHost}")`,
     );
   }
 
@@ -158,7 +161,7 @@ export const loadConfig = (env: Record<string, string | undefined> = process.env
 
   return {
     port: num(env, "PORT", 8080, { min: 1, max: 65535 }),
-    hostname,
+    bindHost,
     publicUrl,
     logLevel: parseLogLevel(str(env, "LOG_LEVEL") || undefined),
     maxBodyBytes: num(env, "MAX_BODY_BYTES", 5 * 1024 * 1024, {
@@ -188,7 +191,7 @@ export const loadConfig = (env: Record<string, string | undefined> = process.env
 
 export const redactedConfig = (config: Config): Record<string, unknown> => ({
   port: config.port,
-  hostname: config.hostname,
+  bindHost: config.bindHost,
   publicUrl: config.publicUrl,
   logLevel: config.logLevel,
   maxBodyBytes: config.maxBodyBytes,

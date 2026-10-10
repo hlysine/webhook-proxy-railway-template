@@ -129,13 +129,38 @@ const handlePush = async (ctx: Context, req: Request): Promise<Response> => {
   return ack();
 };
 
-const PUSH_PATHS = new Set(["/", "/webhook", "/pubsub", "/push"]);
+const STATIC_PUSH_PATHS = ["/", "/webhook", "/pubsub", "/push"];
+
+export const pushPathsFor = (config: Config): string[] => {
+  const route = config.hermes.route.replace(/^\/+|\/+$/g, "");
+  const paths = new Set(STATIC_PUSH_PATHS);
+  if (route !== "") {
+    paths.add(`/${route}`);
+    paths.add(`/webhook/${route}`);
+    paths.add(`/webhooks/${route}`);
+  }
+  return [...paths];
+};
+
+const rejectMethod = (log: Logger): Response => {
+  log.warn("method_not_allowed", { expected: "POST" });
+  return json(405, { error: "method_not_allowed", expected: "POST" });
+};
+
+const unknownPath = (log: Logger, pushPaths: string[]): Response => {
+  log.info("unmatched_path", { pushPaths });
+  return json(404, { error: "not_found", pushPaths });
+};
 
 export const createHandler = (ctx: Context) => {
+  const pushPaths = pushPathsFor(ctx.config);
+  const pushSet = new Set(pushPaths);
+
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, "") : "/";
-    const isPushPath = PUSH_PATHS.has(path) || path === `/${ctx.config.hermes.route}`;
+    const isPushPath = pushSet.has(path);
+    const log = ctx.log.child({ method: req.method, path });
 
     if (req.method === "GET" || req.method === "HEAD") {
       if (path === "/health" || path === "/healthz") {
@@ -144,20 +169,20 @@ export const createHandler = (ctx: Context) => {
       if (path === "/") {
         return json(200, {
           name: "pubsub-hermes-webhook-proxy",
-          accept: ["POST /", "POST /webhook", "POST /pubsub"],
+          accept: pushPaths.map((entry) => `POST ${entry}`),
           route: ctx.config.hermes.route,
           jwtValidation: ctx.config.insecureSkipJwt ? "disabled" : "enabled",
           forwardMode: ctx.config.hermes.mode,
         });
       }
-      return isPushPath ? json(405, { error: "method_not_allowed" }) : json(404, { error: "not_found" });
+      return isPushPath ? rejectMethod(log) : unknownPath(log, pushPaths);
     }
 
     if (req.method !== "POST") {
-      return isPushPath ? json(405, { error: "method_not_allowed" }) : json(404, { error: "not_found" });
+      return isPushPath ? rejectMethod(log) : unknownPath(log, pushPaths);
     }
 
     if (isPushPath) return handlePush(ctx, req);
-    return json(404, { error: "not_found" });
+    return unknownPath(log, pushPaths);
   };
 };

@@ -20,7 +20,7 @@ const handler = createHandler({ config, log, verifier, fetchImpl: fetch });
 
 const server = Bun.serve({
   port: config.port,
-  hostname: config.hostname,
+  hostname: config.bindHost,
   idleTimeout: 60,
   development: false,
   fetch: handler,

@@ -7,7 +7,7 @@ import type { FetchLike } from "../src/fetch-like.ts";
 const baseEnv = {
   HERMES_WEBHOOK_URL: "https://hermes.example.railway.app/webhooks/gmail",
   HERMES_WEBHOOK_SECRET: "route-secret",
-  HOSTNAME: "127.0.0.1",
+  BIND_HOST: "127.0.0.1",
 };
 
 const gmailData = (inner: unknown): string =>
